@@ -176,6 +176,26 @@ def _mount_clerk_widget(publishable_key: str) -> None:
         try { SafeURL[key] = NativeURL[key]; } catch(e) {}
       }
       window.URL = SafeURL;
+
+      // Protect history.replaceState and history.pushState from about:srcdoc URL mismatch errors
+      try {
+        var _origReplaceState = window.history.replaceState.bind(window.history);
+        window.history.replaceState = function(state, title, url) {
+          try {
+            return _origReplaceState(state, title, url);
+          } catch (e) {
+            try { return _origReplaceState(state, title); } catch (e2) {}
+          }
+        };
+        var _origPushState = window.history.pushState.bind(window.history);
+        window.history.pushState = function(state, title, url) {
+          try {
+            return _origPushState(state, title, url);
+          } catch (e) {
+            try { return _origPushState(state, title); } catch (e2) {}
+          }
+        };
+      } catch(e) {}
     })();
   </script>
   <script src="https://cdn.jsdelivr.net/npm/@clerk/clerk-js@5/dist/clerk.browser.js"
