@@ -15,16 +15,31 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT_DIR / ".env", override=True)
 
 
-def _get_bool(key: str, default: bool) -> bool:
+def _get_raw(key: str) -> str | None:
     val = os.getenv(key)
+    if val is not None and val.strip() != "":
+        return val
+    try:
+        import streamlit as st
+        if hasattr(st, "secrets") and key in st.secrets:
+            s_val = str(st.secrets[key])
+            if s_val.strip() != "":
+                return s_val
+    except Exception:
+        pass
+    return None
+
+
+def _get_bool(key: str, default: bool) -> bool:
+    val = _get_raw(key)
     if val is None:
         return default
     return val.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _get_float(key: str, default: float) -> float:
-    val = os.getenv(key)
-    if val is None or val.strip() == "":
+    val = _get_raw(key)
+    if val is None:
         return default
     try:
         return float(val)
@@ -33,8 +48,8 @@ def _get_float(key: str, default: float) -> float:
 
 
 def _get_int(key: str, default: int) -> int:
-    val = os.getenv(key)
-    if val is None or val.strip() == "":
+    val = _get_raw(key)
+    if val is None:
         return default
     try:
         return int(val)
@@ -70,17 +85,17 @@ class Settings:
 def load_settings() -> Settings:
     return Settings(
         root_dir=ROOT_DIR,
-        food_model_path=_resolve_path(os.getenv("FOOD_MODEL_PATH")),
-        fake_model_path=_resolve_path(os.getenv("FAKE_MODEL_PATH")),
-        yolo_model_path=_resolve_path(os.getenv("YOLO_MODEL_PATH")),
+        food_model_path=_resolve_path(_get_raw("FOOD_MODEL_PATH")),
+        fake_model_path=_resolve_path(_get_raw("FAKE_MODEL_PATH")),
+        yolo_model_path=_resolve_path(_get_raw("YOLO_MODEL_PATH")),
         food_confidence_threshold=_get_float("FOOD_CONFIDENCE_THRESHOLD", 0.80),
         fusion_alpha=_get_float("FUSION_ALPHA", 0.50),
         enable_fusion=_get_bool("ENABLE_FUSION", True),
         fake_model_real_index=_get_int("FAKE_MODEL_REAL_INDEX", 0),
         authenticity_threshold=_get_float("AUTHENTICITY_THRESHOLD", 0.80),
-        device_pref=os.getenv("DEVICE", "auto").strip().lower(),
-        clerk_publishable_key=os.getenv("CLERK_PUBLISHABLE_KEY") or None,
-        clerk_secret_key=os.getenv("CLERK_SECRET_KEY") or None,
+        device_pref=(_get_raw("DEVICE") or "auto").strip().lower(),
+        clerk_publishable_key=_get_raw("CLERK_PUBLISHABLE_KEY") or None,
+        clerk_secret_key=_get_raw("CLERK_SECRET_KEY") or None,
         db_path=ROOT_DIR / "data" / "history.db",
     )
 
