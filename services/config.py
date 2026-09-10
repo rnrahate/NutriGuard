@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 
 # Project root = the folder this file's parent (services/) lives in.
 ROOT_DIR = Path(__file__).resolve().parent.parent
-load_dotenv(ROOT_DIR / ".env")
+load_dotenv(ROOT_DIR / ".env", override=True)
 
 
 def _get_bool(key: str, default: bool) -> bool:
