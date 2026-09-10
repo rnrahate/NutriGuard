@@ -1,0 +1,15 @@
+.env
+__pycache__/
+*.pyc
+.venv/
+venv/
+data/*.db
+data/*.sqlite3
+.streamlit/secrets.toml
+*.jpg
+*.jpeg
+*.png
+!assets/**
+.DS_Store
+.sixth
+.env.example
