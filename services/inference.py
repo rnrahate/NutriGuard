@@ -29,9 +29,10 @@ class ClassificationResult:
 @dataclass
 class AuthenticityResult:
     is_real: bool
-    label: str  # "REAL" or "AI-GENERATED"
+    label: str  # "REAL", "AI-GENERATED", or "SUSPECTED AI"
     synthetic_probability: float
     real_probability: float
+    status_tier: str = "authentic"  # "authentic" | "suspected_ai" | "ai_generated"
 
 
 def _to_tensor(image: Image.Image, device: str) -> torch.Tensor:
@@ -60,7 +61,10 @@ def classify_food(image: Image.Image, loaded: LoadedModel) -> ClassificationResu
 
 @torch.inference_mode()
 def detect_authenticity(
-    image: Image.Image, loaded: LoadedModel, real_index: int
+    image: Image.Image,
+    loaded: LoadedModel,
+    real_index: int,
+    authenticity_threshold: float = 0.80,
 ) -> AuthenticityResult:
     if not loaded.loaded or loaded.model is None:
         raise RuntimeError("Authenticity model is not loaded.")
@@ -78,13 +82,31 @@ def detect_authenticity(
         real_p = float(probs[safe_index])
 
     synthetic_p = 1.0 - real_p
-    is_real = real_p >= 0.5
+
+    # Multi-tier sensitivity analysis:
+    # 1. Real Likelihood >= authenticity_threshold: Certified Real Camera Photograph
+    # 2. Synthetic Likelihood > 0.50: Dominant synthetic artifacts (Legacy GAN / Clear Synthetic)
+    # 3. Real Likelihood in [0.50, authenticity_threshold): Elevated synthetic indicators
+    #    often produced by modern diffusion models (Midjourney, DALL-E 3, SDXL, Flux)
+    if real_p >= authenticity_threshold:
+        is_real = True
+        status_tier = "authentic"
+        label = "REAL"
+    elif synthetic_p > 0.50:
+        is_real = False
+        status_tier = "ai_generated"
+        label = "AI-GENERATED"
+    else:
+        is_real = False
+        status_tier = "suspected_ai"
+        label = "SUSPECTED AI"
 
     return AuthenticityResult(
         is_real=is_real,
-        label="REAL" if is_real else "AI-GENERATED",
+        label=label,
         synthetic_probability=synthetic_p,
         real_probability=real_p,
+        status_tier=status_tier,
     )
 
 

@@ -159,9 +159,9 @@ def final_result_card(
         badge_text = "AUTHENTIC FOOD IMAGE"
         badge_icon = """<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#10B981" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>"""
         badge_color = COLORS["verified"]
-    elif decision == "POTENTIALLY_AI_GENERATED":
+    elif decision in ("POTENTIALLY_AI_GENERATED", "SUSPECTED_AI"):
         theme_class = "ng-result-warning"
-        badge_text = "POTENTIALLY AI-GENERATED"
+        badge_text = "SUSPECTED MODERN AI GENERATION" if decision == "SUSPECTED_AI" else "POTENTIALLY AI-GENERATED"
         badge_icon = """<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#EF4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>"""
         badge_color = COLORS["alert"]
     else:

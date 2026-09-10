@@ -60,6 +60,7 @@ class Settings:
     fusion_alpha: float
     enable_fusion: bool
     fake_model_real_index: int
+    authenticity_threshold: float
     device_pref: str
     clerk_publishable_key: str | None
     clerk_secret_key: str | None
@@ -76,6 +77,7 @@ def load_settings() -> Settings:
         fusion_alpha=_get_float("FUSION_ALPHA", 0.50),
         enable_fusion=_get_bool("ENABLE_FUSION", True),
         fake_model_real_index=_get_int("FAKE_MODEL_REAL_INDEX", 0),
+        authenticity_threshold=_get_float("AUTHENTICITY_THRESHOLD", 0.80),
         device_pref=os.getenv("DEVICE", "auto").strip().lower(),
         clerk_publishable_key=os.getenv("CLERK_PUBLISHABLE_KEY") or None,
         clerk_secret_key=os.getenv("CLERK_SECRET_KEY") or None,

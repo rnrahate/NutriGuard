@@ -212,7 +212,10 @@ def run_verification(image: Image.Image, user_id: Optional[str]):
             }, current_summary="Analyzing Frequency & Diffusion Artifacts")
 
         authenticity = inference.detect_authenticity(
-            image, fake_model, SETTINGS.fake_model_real_index
+            image,
+            fake_model,
+            SETTINGS.fake_model_real_index,
+            authenticity_threshold=SETTINGS.authenticity_threshold,
         )
         if SETTINGS.enable_fusion:
             fusion = inference.fusion_score(
@@ -223,8 +226,15 @@ def run_verification(image: Image.Image, user_id: Optional[str]):
         time.sleep(0.3)
 
         # Step 5: Final Decision
-        final_state = "verified" if authenticity.is_real else "warning"
-        decision = "AUTHENTIC" if authenticity.is_real else "POTENTIALLY_AI_GENERATED"
+        if authenticity.status_tier == "authentic":
+            final_state = "verified"
+            decision = "AUTHENTIC"
+        elif authenticity.status_tier == "suspected_ai":
+            final_state = "warning"
+            decision = "SUSPECTED_AI"
+        else:
+            final_state = "alert"
+            decision = "POTENTIALLY_AI_GENERATED"
         with pipeline_slot:
             pipeline.render_pipeline_card({
                 "01": "done", "02": "done", "03": "done", "04": "done", "05": "done"
@@ -287,12 +297,20 @@ def render_verification_result(result: dict):
     if decision == "AUTHENTIC":
         body_text = (
             f"The image satisfies food validation ({cls.top_confidence:.1%} confidence for {food_label}) "
-            "and was classified as an authentic, real-world photograph with low synthetic probability."
+            f"and meets the strict authenticity gate ({auth_res.real_probability:.1%} real likelihood vs "
+            f"{SETTINGS.authenticity_threshold:.0%} required threshold)."
+        )
+    elif decision == "SUSPECTED_AI":
+        body_text = (
+            f"The image depicts {food_label} ({cls.top_confidence:.1%} confidence), but our authenticity "
+            f"neural network detected elevated synthetic indicators ({auth_res.synthetic_probability:.1%} synthetic likelihood). "
+            f"Because real likelihood ({auth_res.real_probability:.1%}) falls below the {SETTINGS.authenticity_threshold:.0%} "
+            "authenticity threshold, this image is flagged as suspected modern AI diffusion generation (e.g. Midjourney, DALL-E, SDXL, Flux)."
         )
     elif decision == "POTENTIALLY_AI_GENERATED":
         body_text = (
             f"The image depicts {food_label} ({cls.top_confidence:.1%} confidence), but our authenticity "
-            f"neural network flagged a {auth_res.synthetic_probability:.1%} probability of synthetic / AI generation."
+            f"neural network flagged a dominant {auth_res.synthetic_probability:.1%} probability of synthetic / AI generation."
         )
     else:
         body_text = (
@@ -444,7 +462,7 @@ def page_history():
             badge_border = COLORS["verified_border"]
             badge_bg = COLORS["verified_bg"]
             badge_icon = "✓"
-        elif r.final_decision == "POTENTIALLY_AI_GENERATED":
+        elif r.final_decision in ("POTENTIALLY_AI_GENERATED", "SUSPECTED_AI"):
             badge_color = COLORS["alert"]
             badge_border = COLORS["alert_border"]
             badge_bg = COLORS["alert_bg"]
@@ -528,6 +546,7 @@ def page_status():
         device_label = food_model.device.upper()
         _render_status_metric("Inference Engine", True, device_label, "CPU", f"Preference: {SETTINGS.device_pref.upper()}")
         _render_status_metric("Confidence Gate Threshold", True, f"{SETTINGS.food_confidence_threshold:.0%}", "", "Minimum confidence to proceed")
+        _render_status_metric("Authenticity Gate", True, f"{SETTINGS.authenticity_threshold:.0%}", "", "Strict minimum real likelihood")
         _render_status_metric("Fusion Weight (Alpha)", SETTINGS.enable_fusion, f"{SETTINGS.fusion_alpha:.2f}", "DISABLED", "Multimodal score blending")
         _render_status_metric("Authenticity REAL Index", True, f"Index {SETTINGS.fake_model_real_index}", "", "Target neuron for real class")
 
