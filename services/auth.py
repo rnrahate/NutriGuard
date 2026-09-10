@@ -313,10 +313,7 @@ def _mount_clerk_widget(publishable_key: str) -> None:
 </body>
 </html>"""
     widget_html = template.replace("__CLERK_PK__", publishable_key)
-    if hasattr(st, "iframe"):
-        st.iframe(widget_html, height=720, width="stretch")
-    else:
-        components.html(widget_html, height=720, scrolling=True)
+    components.html(widget_html, height=720, scrolling=True)
 
 
 def render_login_gate(settings: Settings) -> Optional[AuthUser]:

@@ -60,10 +60,7 @@ models_ready = food_model.loaded and fake_model.loaded
 
 # ---------------------------------------------------------------------- auth --
 def require_user() -> Optional[auth.AuthUser]:
-    user = auth.current_user()
-    if user:
-        return user
-    return auth.render_login_gate(SETTINGS)
+    return auth.current_user()
 
 
 # ----------------------------------------------------------------- dashboard --
