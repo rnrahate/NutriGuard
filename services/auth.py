@@ -1,16 +1,17 @@
 """
-Clerk authentication — modular, secure, and styled for NutriGuard.
+NutriGuard Authentication — fully server-side, no iframe required.
 
-CLERK_SECRET_KEY is never sent to the browser; it is only used server-side
-(in verify_session_token) to call Clerk's Backend REST API.
+Sign-in flow:
+  1. Show a branded email + password form.
+  2. Call Clerk's Frontend API from Python to authenticate.
+  3. Verify the resulting session via Clerk's Backend API.
+  4. Store the AuthUser in st.session_state.
 
-Communication between the Clerk JS widget (inside st.iframe) and Streamlit
-uses window.parent.location.href redirect. Loop prevention is handled by
-tracking the last failed token in session state and clearing query params
-immediately on receipt.
+No browser JS, no iframe, no cross-origin issues.
 """
 from __future__ import annotations
 
+import base64
 import html
 from dataclasses import dataclass
 from typing import Optional
@@ -20,8 +21,9 @@ import streamlit as st
 from services.config import Settings
 
 SESSION_KEY = "nutriguard_user"
-_FAIL_FLAG = "_clerk_verify_failed_token"
 
+
+# ─────────────────────────────────────────── data model ──────────────────────
 
 @dataclass
 class AuthUser:
@@ -31,6 +33,8 @@ class AuthUser:
     avatar_url: Optional[str] = None
     is_guest: bool = False
 
+
+# ─────────────────────────────────────── helpers ─────────────────────────────
 
 def is_configured(settings: Settings) -> bool:
     return bool(settings.clerk_publishable_key and settings.clerk_secret_key)
@@ -43,61 +47,111 @@ def current_user() -> Optional[AuthUser]:
 def sign_out() -> None:
     st.session_state.pop(SESSION_KEY, None)
     st.session_state.pop("verification_result", None)
-    st.session_state.pop(_FAIL_FLAG, None)
     try:
         st.query_params.clear()
     except Exception:
         pass
 
 
+def _frontend_api_base(publishable_key: str) -> str:
+    """
+    Decode the Clerk publishable key to get the Frontend API base URL.
+
+    pk_test_<base64-encoded-instance-domain>
+    e.g. pk_test_cmlnaHQtZmxhbWluZ28tMzEuY2xlcmsuYWNjb3VudHMuZGV2JA
+      → right-flamingo-31.clerk.accounts.dev
+      → https://right-flamingo-31.clerk.accounts.dev
+    """
+    try:
+        # Strip pk_test_ / pk_live_ prefix
+        encoded = publishable_key.split("_", 2)[-1]
+        # Re-pad to valid base64 length
+        padded = encoded + "=" * (-len(encoded) % 4)
+        domain = base64.b64decode(padded).decode().rstrip("$").strip()
+        return f"https://{domain}"
+    except Exception:
+        return ""
+
+
+# ─────────────────────────────── server-side Clerk auth ──────────────────────
+
+def _clerk_sign_in(email: str, password: str, settings: Settings) -> Optional[str]:
+    """
+    Create a sign-in attempt via Clerk's Frontend API.
+    Returns a session_id on success, or None on failure.
+    """
+    import requests
+
+    base = _frontend_api_base(settings.clerk_publishable_key or "")
+    if not base:
+        return None
+
+    try:
+        resp = requests.post(
+            f"{base}/v1/client/sign_ins",
+            headers={
+                "Authorization": f"Bearer {settings.clerk_publishable_key}",
+                "Content-Type": "application/json",
+                "User-Agent": "NutriGuard/1.0 (+https://nutriguard.streamlit.app)",
+            },
+            json={"identifier": email, "password": password},
+            timeout=12,
+        )
+        if resp.status_code not in (200, 201):
+            return None
+
+        body = resp.json()
+        data = body.get("response", body)
+        if data.get("status") != "complete":
+            return None
+
+        return data.get("created_session_id")
+    except Exception:
+        return None
+
+
 def verify_session_token(token: str, settings: Settings) -> Optional[AuthUser]:
-    """Verify a Clerk session token server-side using the secret key."""
+    """Verify a Clerk session ID server-side via the Backend API."""
     import requests
 
     if not settings.clerk_secret_key:
         return None
 
     try:
-        # 1. Verify active session by session ID
         session_url = f"https://api.clerk.com/v1/sessions/{token}"
         resp = requests.get(
             session_url,
             headers={"Authorization": f"Bearer {settings.clerk_secret_key}"},
-            timeout=7,
+            timeout=10,
         )
         if resp.status_code != 200:
             return None
 
-        sess_data = resp.json()
-        if sess_data.get("status") != "active":
+        sess = resp.json()
+        if sess.get("status") != "active":
             return None
 
-        user_id = sess_data.get("user_id")
+        user_id = sess.get("user_id")
         if not user_id:
             return None
 
-        # 2. Enrich with user profile details
-        display_name = user_id
-        email = None
-        avatar_url = None
-
+        display_name, email, avatar_url = user_id, None, None
         try:
-            user_url = f"https://api.clerk.com/v1/users/{user_id}"
             u_resp = requests.get(
-                user_url,
+                f"https://api.clerk.com/v1/users/{user_id}",
                 headers={"Authorization": f"Bearer {settings.clerk_secret_key}"},
-                timeout=5,
+                timeout=7,
             )
             if u_resp.status_code == 200:
-                u_data = u_resp.json()
-                first = (u_data.get("first_name") or "").strip()
-                last = (u_data.get("last_name") or "").strip()
+                u = u_resp.json()
+                first = (u.get("first_name") or "").strip()
+                last = (u.get("last_name") or "").strip()
                 full = f"{first} {last}".strip()
-                emails = u_data.get("email_addresses") or []
+                emails = u.get("email_addresses") or []
                 if emails:
                     email = emails[0].get("email_address")
-                display_name = full or (u_data.get("username") or email or user_id)
-                avatar_url = u_data.get("image_url")
+                display_name = full or u.get("username") or email or user_id
+                avatar_url = u.get("image_url")
         except Exception:
             pass
 
@@ -112,235 +166,38 @@ def verify_session_token(token: str, settings: Settings) -> Optional[AuthUser]:
         return None
 
 
-def _build_clerk_html(publishable_key: str, force_signout: bool = False) -> str:
-    force_js = ""
-    if force_signout:
-        force_js = """
-      // Force sign-out any cached Clerk session to break redirect loop
-      try {
-        if (window.Clerk && window.Clerk.signOut) {
-          window.Clerk.signOut();
-        }
-      } catch(e) {}
-"""
-    return """<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <style>
-    body {
-      margin: 0;
-      padding: 0;
-      background: transparent;
-      display: flex;
-      justify-content: center;
-      align-items: flex-start;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    }
-    #clerk-sign-in {
-      width: 100%;
-      max-width: 440px;
-      margin: 0 auto;
-    }
-    .clerk-loader {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      padding: 40px 20px;
-      color: #94A3B8;
-      font-size: 14px;
-    }
-    .spinner {
-      width: 28px;
-      height: 28px;
-      border: 3px solid rgba(45, 212, 191, 0.15);
-      border-top-color: #2DD4BF;
-      border-radius: 50%;
-      animation: spin 0.8s linear infinite;
-      margin-bottom: 12px;
-    }
-    @keyframes spin {
-      to { transform: rotate(360deg); }
-    }
-  </style>
-  <script>
-    // Protect history API from about:srcdoc origin errors
-    (function() {
-      ['replaceState', 'pushState'].forEach(function(m) {
-        try {
-          var orig = window.history[m].bind(window.history);
-          window.history[m] = function(s, t, u) {
-            try { return orig(s, t, u); } catch(e) { try { return orig(s, t); } catch(e2) {} }
-          };
-        } catch(e) {}
-      });
-    })();
-  </script>
-  <script async crossorigin="anonymous"
-    data-clerk-publishable-key="__CLERK_PK__"
-    src="https://cdn.jsdelivr.net/npm/@clerk/clerk-js@5/dist/clerk.browser.js">
-  </script>
-</head>
-<body>
-  <div id="clerk-sign-in">
-    <div id="loader" class="clerk-loader">
-      <div class="spinner"></div>
-      <span>Connecting to secure authentication...</span>
-    </div>
-  </div>
-  <script>
-    __FORCE_SIGNOUT_JS__
-
-    function sendSession(token) {
-      if (!token) return;
-      try {
-        var url = new URL(window.parent.location.href);
-        url.searchParams.set('clerk_session', token);
-        window.parent.location.replace(url.toString());
-      } catch(e) {
-        try {
-          window.top.location.search = '?clerk_session=' + encodeURIComponent(token);
-        } catch(e2) { console.warn('NutriGuard redirect failed', e2); }
-      }
-    }
-
-    function initClerk() {
-      if (!window.Clerk) { setTimeout(initClerk, 100); return; }
-      window.Clerk.load({
-        appearance: {
-          variables: {
-            colorPrimary: '#2DD4BF', colorBackground: '#171E27',
-            colorText: '#F8FAFC', colorInputBackground: '#10161D',
-            colorInputText: '#F8FAFC', colorTextSecondary: '#94A3B8',
-            borderRadius: '8px'
-          },
-          elements: {
-            card: { backgroundColor: '#171E27', border: '1px solid #222D3D',
-                    boxShadow: '0 12px 36px rgba(0,0,0,0.5)' },
-            headerTitle: { color: '#F8FAFC' },
-            headerSubtitle: { color: '#94A3B8' },
-            socialButtonsBlockButton: { backgroundColor: '#1F2937',
-              borderColor: '#374151', color: '#F8FAFC' },
-            socialButtonsBlockButtonText: { color: '#F8FAFC', fontWeight: '600' },
-            dividerLine: { backgroundColor: '#2E3D52' },
-            dividerText: { color: '#94A3B8' },
-            formFieldLabel: { color: '#CBD5E1' },
-            formFieldInput: { backgroundColor: '#10161D',
-              borderColor: '#2E3D52', color: '#F8FAFC' },
-            formButtonPrimary: { backgroundColor: '#2DD4BF',
-              color: '#0B0F14', fontWeight: '600' },
-            footerActionLink: { color: '#2DD4BF' }
-          }
-        }
-      }).then(function() {
-        var loader = document.getElementById('loader');
-        if (loader) loader.style.display = 'none';
-        if (window.Clerk.session && window.Clerk.session.id) {
-          sendSession(window.Clerk.session.id);
-          return;
-        }
-        var target = document.getElementById('clerk-sign-in');
-        window.Clerk.mountSignIn(target, { routing: 'virtual' });
-        window.Clerk.addListener(function(res) {
-          if (res.session && res.session.id) sendSession(res.session.id);
-        });
-      }).catch(function(err) {
-        var loader = document.getElementById('loader');
-        if (loader) loader.innerHTML =
-          '<span style="color:#F43F5E;font-size:13px;">Auth error: ' +
-          (err.message || String(err)) + '</span>';
-      });
-    }
-
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', initClerk);
-    } else {
-      initClerk();
-    }
-  </script>
-</body>
-</html>"""
-
-
-def _mount_clerk_widget(publishable_key: str, force_signout: bool = False) -> None:
-    force_js = ""
-    if force_signout:
-        force_js = (
-            "try { if (window.Clerk && window.Clerk.signOut) {"
-            " window.Clerk.signOut(); } } catch(e) {}"
-        )
-    # Inject PK and optional force-signout JS into the template
-    raw = _build_clerk_html(publishable_key, force_signout=force_signout)
-    widget_html = raw.replace("__CLERK_PK__", publishable_key)
-    widget_html = widget_html.replace("__FORCE_SIGNOUT_JS__", force_js)
-    st.iframe(widget_html, height=680)
-
-
-
-def render_login_gate(settings: Settings) -> Optional[AuthUser]:
+def authenticate_with_clerk(
+    email: str, password: str, settings: Settings
+) -> tuple[Optional[AuthUser], str]:
     """
-    Renders the NutriGuard login gate.
-
-    Loop-safe flow:
-    1. Signout param → clear session and rerun.
-    2. User already in session state → return immediately.
-    3. ?clerk_session=<token> present → clear it immediately, then verify once.
-       - Success: store user, rerun.
-       - Failure: record failed token in session state, rerun (shows login page).
-    4. If last verification failed with the same token, show error + Clerk widget
-       with force_signout so Clerk JS clears its session before re-mounting.
+    Full Clerk auth flow: sign in → verify session → return user.
+    Returns (AuthUser, "") on success or (None, error_message) on failure.
     """
-    if "signout" in st.query_params:
-        sign_out()
-        st.rerun()
+    session_id = _clerk_sign_in(email, password, settings)
+    if not session_id:
+        return None, "Invalid email or password. Please try again."
 
-    user = current_user()
-    if user:
-        return user
+    user = verify_session_token(session_id, settings)
+    if not user:
+        return None, "Authentication succeeded but session could not be verified. Please try again."
 
-    # ── Token handling ───────────────────────────────────────────────────────
-    token = st.query_params.get("clerk_session", "")
-    if token:
-        # IMMEDIATELY clear the query param to prevent rerun loops
-        st.query_params.clear()
+    return user, ""
 
-        last_failed = st.session_state.get(_FAIL_FLAG, "")
-        if token == last_failed:
-            # Same token failed before — show error but don't retry
-            st.session_state.pop(_FAIL_FLAG, None)
-            st.error(
-                "⚠️ Session verification failed. Please sign in again. "
-                "If this keeps happening, clear your browser cookies for this site."
-            )
-        else:
-            with st.spinner("Verifying secure credentials..."):
-                verified = verify_session_token(token, settings)
-            if verified:
-                st.session_state[SESSION_KEY] = verified
-                st.session_state.pop(_FAIL_FLAG, None)
-                st.rerun()
-            else:
-                # Record failure and rerun cleanly (no clerk_session in URL now)
-                st.session_state[_FAIL_FLAG] = token
-                st.rerun()
 
-    configured = is_configured(settings)
-    # Show the Clerk widget with force_signout if the last attempt failed
-    # — this breaks the auto-redirect loop by clearing Clerk's cached session
-    failed_before = bool(st.session_state.get(_FAIL_FLAG, ""))
+# ─────────────────────────────────────── login gate UI ───────────────────────
 
-    # ── Branded login header ─────────────────────────────────────────────────
+def _render_login_header() -> None:
     st.markdown(
         """
         <div class="ng-auth-container">
           <div class="ng-auth-motif">
-            <svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
               <path d="M24 4L6 12V22C6 33.1 13.7 43.4 24 46C34.3 43.4 42 33.1 42 22V12L24 4Z"
-                    fill="url(#shield_grad)" stroke="#2DD4BF" stroke-width="2" stroke-linejoin="round"/>
-              <path d="M16 24L22 30L32 18" stroke="#F8FAFC" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+                    fill="url(#sg)" stroke="#2DD4BF" stroke-width="2" stroke-linejoin="round"/>
+              <path d="M16 24L22 30L32 18" stroke="#F8FAFC" stroke-width="3"
+                    stroke-linecap="round" stroke-linejoin="round"/>
               <defs>
-                <linearGradient id="shield_grad" x1="6" y1="4" x2="42" y2="46" gradientUnits="userSpaceOnUse">
+                <linearGradient id="sg" x1="6" y1="4" x2="42" y2="46" gradientUnits="userSpaceOnUse">
                   <stop stop-color="#1D2630"/>
                   <stop offset="1" stop-color="#0F172A"/>
                 </linearGradient>
@@ -360,39 +217,118 @@ def render_login_gate(settings: Settings) -> Optional[AuthUser]:
         unsafe_allow_html=True,
     )
 
-    if not configured:
-        st.markdown(
-            """
-            <div class="ng-card" style="max-width:540px; margin: 0 auto 1.5rem auto; text-align:center;">
-              <div class="ng-card-label" style="color:#F59E0B;">DEVELOPMENT MODE</div>
-              <div class="ng-card-title" style="font-size:1.15rem; color:#F8FAFC;">Clerk Keys Not Configured</div>
-              <div class="ng-card-body" style="font-size:0.9rem; margin-bottom:1rem;">
-                Add <code>CLERK_PUBLISHABLE_KEY</code> and <code>CLERK_SECRET_KEY</code> to your Streamlit
-                secrets (or <code>.env</code>) to enable full identity verification.
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+
+def render_login_gate(settings: Settings) -> Optional[AuthUser]:
+    """
+    Render the NutriGuard login page and return AuthUser when signed in.
+
+    Uses a server-side email + password form backed by Clerk's REST API.
+    No iframe, no browser JS, no cross-origin issues.
+    """
+    if "signout" in st.query_params:
+        sign_out()
+        st.rerun()
+
+    user = current_user()
+    if user:
+        return user
+
+    configured = is_configured(settings)
+    _render_login_header()
 
     col1, col2, col3 = st.columns([1, 2.2, 1])
     with col2:
         if configured:
-            _mount_clerk_widget(
-                settings.clerk_publishable_key,
-                force_signout=failed_before,
-            )
+            # ── Clerk email + password form ───────────────────────────────
             st.markdown(
                 """
-                <div style="text-align:center; color:#64748B; font-size:0.8rem;
-                            margin-top:0.6rem; letter-spacing:0.02em;">
-                  🔒 Secure authentication powered by Clerk
+                <div style="
+                  background:#131920;
+                  border:1px solid #222D3D;
+                  border-radius:12px;
+                  padding:1.6rem 1.8rem 1.2rem;
+                  margin-bottom:0.6rem;
+                  box-shadow:0 12px 36px rgba(0,0,0,0.5);
+                ">
+                  <div style="
+                    font-family:'Outfit',sans-serif;
+                    font-size:1.15rem;
+                    font-weight:700;
+                    color:#F8FAFC;
+                    margin-bottom:0.25rem;
+                  ">Sign in to NutriGuard</div>
+                  <div style="
+                    font-family:'JetBrains Mono',monospace;
+                    font-size:0.72rem;
+                    color:#94A3B8;
+                    margin-bottom:1.2rem;
+                    letter-spacing:0.04em;
+                  ">Powered by Clerk · End-to-end encrypted</div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            with st.form("ng_clerk_login", clear_on_submit=False):
+                email_in = st.text_input(
+                    "Email address",
+                    placeholder="you@example.com",
+                    label_visibility="visible",
+                )
+                pass_in = st.text_input(
+                    "Password",
+                    type="password",
+                    placeholder="••••••••",
+                    label_visibility="visible",
+                )
+                submitted = st.form_submit_button(
+                    "Sign In",
+                    use_container_width=True,
+                    type="primary",
+                )
+
+            st.markdown("</div>", unsafe_allow_html=True)
+
+            if submitted:
+                if not email_in or not pass_in:
+                    st.error("Please enter both email and password.")
+                else:
+                    with st.spinner("Authenticating with Clerk..."):
+                        auth_user, err = authenticate_with_clerk(
+                            email_in.strip(), pass_in, settings
+                        )
+                    if auth_user:
+                        st.session_state[SESSION_KEY] = auth_user
+                        st.rerun()
+                    else:
+                        st.error(err)
+
+            st.markdown(
+                """
+                <div style="text-align:center;color:#475569;font-size:0.78rem;margin-top:0.4rem;">
+                  🔒 Credentials verified server-side via Clerk's secure API
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
-        st.markdown("<div style='height:0.8rem;'></div>", unsafe_allow_html=True)
+        else:
+            # ── Dev-mode notice ───────────────────────────────────────────
+            st.markdown(
+                """
+                <div class="ng-card" style="text-align:center;margin-bottom:1rem;">
+                  <div class="ng-card-label" style="color:#F59E0B;">DEVELOPMENT MODE</div>
+                  <div class="ng-card-title" style="font-size:1.1rem;">Clerk Not Configured</div>
+                  <div style="font-size:0.88rem;color:#94A3B8;margin-top:0.4rem;">
+                    Set <code>CLERK_PUBLISHABLE_KEY</code> and <code>CLERK_SECRET_KEY</code>
+                    in Streamlit secrets to enable sign-in.
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        # ── Guest bypass ──────────────────────────────────────────────────
+        st.markdown("<div style='height:0.6rem;'></div>", unsafe_allow_html=True)
         btn_label = (
             "Continue as Guest"
             if not configured
@@ -405,7 +341,7 @@ def render_login_gate(settings: Settings) -> Optional[AuthUser]:
                 email="guest@nutriguard.ai",
                 is_guest=True,
             )
-            st.session_state.pop(_FAIL_FLAG, None)
             st.rerun()
 
     return None
+
