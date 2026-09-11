@@ -1,28 +1,31 @@
 """
 NutriGuard Authentication.
 
-The Clerk JS sign-in widget is served from Streamlit's static file server
-(/app/static/clerk_widget.html) which shares the SAME ORIGIN as the Streamlit
-app. This means window.parent.location works without cross-origin restrictions,
-enabling the session-token redirect to work reliably.
-
-Flow:
-  1. st.iframe("/app/static/clerk_widget.html?pk=<PK>") -> full Clerk UI
-  2. User signs in -> Clerk JS redirects parent to ?clerk_session=<id>
-  3. Python verifies session via Clerk Backend API -> stores AuthUser
+Uses Streamlit's official Custom Component API to embed Clerk's virtual
+sign-in interface in an isolated, secure component frame. Communication
+happens bi-directionally via window.postMessage:
+  1. Component loads Clerk SDK and mounts Clerk SignIn widget.
+  2. On successful authentication, component sends session ID to Streamlit.
+  3. Streamlit verifies the session server-side with Clerk's Backend API.
+  4. AuthUser object is stored in st.session_state and app unlocks.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
-import urllib.parse
 
+import requests
 import streamlit as st
+import streamlit.components.v1 as components
 
 from services.config import Settings
 
 SESSION_KEY = "nutriguard_user"
-_FAIL_FLAG  = "_clerk_failed_token"
+
+# Register the Streamlit custom component for Clerk Auth
+_COMPONENT_DIR = Path(__file__).resolve().parent.parent / "components" / "clerk_auth"
+_clerk_component = components.declare_component("clerk_auth", path=str(_COMPONENT_DIR))
 
 
 # ─────────────────────────────────────────── data model ──────────────────────
@@ -49,6 +52,7 @@ def current_user() -> Optional[AuthUser]:
 def sign_out() -> None:
     st.session_state.pop(SESSION_KEY, None)
     st.session_state.pop("verification_result", None)
+    st.session_state["_clerk_sign_out_needed"] = True
     try:
         st.query_params.clear()
     except Exception:
@@ -59,8 +63,6 @@ def sign_out() -> None:
 
 def verify_session_token(token: str, settings: Settings) -> Optional[AuthUser]:
     """Verify a Clerk session ID via the Backend API (secret key never sent to browser)."""
-    import requests
-
     if not settings.clerk_secret_key:
         return None
 
@@ -112,23 +114,6 @@ def verify_session_token(token: str, settings: Settings) -> Optional[AuthUser]:
         return None
 
 
-# ── Clerk widget via static file (same-origin iframe) ────────────────────────
-
-def _mount_clerk_widget(publishable_key: str) -> None:
-    """
-    Render the Clerk sign-in widget in a same-origin iframe.
-
-    Streamlit serves static/ files from the app's own domain:
-      https://nutriguard.streamlit.app/app/static/clerk_widget.html
-
-    Because the iframe origin matches the parent page, window.parent.location
-    is fully accessible — no cross-origin security errors.
-    The widget redirects to ?clerk_session=<id> after a successful sign-in.
-    """
-    pk_encoded = urllib.parse.quote(publishable_key, safe="")
-    st.iframe(f"/app/static/clerk_widget.html?pk={pk_encoded}", height=680)
-
-
 # ── Login gate UI ─────────────────────────────────────────────────────────────
 
 def _render_header() -> None:
@@ -165,13 +150,10 @@ def render_login_gate(settings: Settings) -> Optional[AuthUser]:
     """
     Render the NutriGuard login gate.
 
-    The Clerk widget runs in /app/static/clerk_widget.html (same-origin),
-    so window.parent.location.replace() works and sets ?clerk_session=<id>.
-
-    Loop-safe token flow:
-    - Token arrives in ?clerk_session -> cleared immediately to prevent rerun loop
-    - Verified once via Backend API
-    - On failure: token recorded in _FAIL_FLAG -> not re-verified on next rerun
+    - Embeds Clerk's sign-in widget via Streamlit Custom Component.
+    - Receives session_id when the user logs in.
+    - Verifies the session ID server-side with Clerk REST API.
+    - Supports Guest evaluation mode.
     """
     if "signout" in st.query_params:
         sign_out()
@@ -181,46 +163,35 @@ def render_login_gate(settings: Settings) -> Optional[AuthUser]:
     if user:
         return user
 
-    # ── Handle clerk_session redirect from the Clerk widget ───────────────────
-    token = st.query_params.get("clerk_session", "")
-    if token:
-        st.query_params.clear()  # clear immediately to break any potential loop
-
-        last_failed = st.session_state.get(_FAIL_FLAG, "")
-        if token == last_failed:
-            # This exact token already failed — show error once and reset
-            st.session_state.pop(_FAIL_FLAG, None)
-            st.error(
-                "Session verification failed. Please sign in again. "
-                "If this persists, clear your browser cookies for this site."
-            )
-        else:
-            with st.spinner("Verifying your Clerk session..."):
-                verified = verify_session_token(token, settings)
-            if verified:
-                st.session_state[SESSION_KEY] = verified
-                st.session_state.pop(_FAIL_FLAG, None)
-                st.rerun()
-            else:
-                st.session_state[_FAIL_FLAG] = token
-                st.rerun()
-
     configured = is_configured(settings)
     _render_header()
 
     col1, col2, col3 = st.columns([1, 2.2, 1])
     with col2:
         if configured:
-            # ── Full Clerk UI via same-origin static file iframe ──────────
-            _mount_clerk_widget(settings.clerk_publishable_key)
+            should_sign_out = st.session_state.pop("_clerk_sign_out_needed", False)
+            session_id = _clerk_component(
+                publishable_key=settings.clerk_publishable_key,
+                sign_out=should_sign_out,
+                key="clerk_auth_login",
+                default=None,
+            )
+            if session_id:
+                with st.spinner("Verifying your Clerk session..."):
+                    verified = verify_session_token(session_id, settings)
+                if verified:
+                    st.session_state[SESSION_KEY] = verified
+                    st.rerun()
+                else:
+                    st.error("Session verification failed. Please try signing in again.")
+
             st.markdown(
                 """<div style="text-align:center;color:#475569;font-size:0.77rem;margin-top:0.5rem;">
-                  \U0001f512 Secure sign-in powered by Clerk
+                  🔒 Secure sign-in powered by Clerk
                 </div>""",
                 unsafe_allow_html=True,
             )
         else:
-            # ── Dev-mode notice ───────────────────────────────────────────
             st.markdown(
                 """<div class="ng-card" style="text-align:center;margin-bottom:1rem;">
                   <div class="ng-card-label" style="color:#F59E0B;">DEVELOPMENT MODE</div>
@@ -246,8 +217,6 @@ def render_login_gate(settings: Settings) -> Optional[AuthUser]:
                 email="guest@nutriguard.ai",
                 is_guest=True,
             )
-            st.session_state.pop(_FAIL_FLAG, None)
             st.rerun()
 
     return None
-

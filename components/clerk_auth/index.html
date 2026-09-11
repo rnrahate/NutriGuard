@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>NutriGuard Authentication</title>
+  <style>
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    html, body {
+      background: transparent;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", sans-serif;
+      overflow-x: hidden;
+      width: 100%;
+    }
+    body {
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      padding: 4px 0 16px 0;
+    }
+    #clerk-container {
+      width: 100%;
+      max-width: 440px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    #loader {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 48px 20px;
+      color: #94A3B8;
+      font-size: 13px;
+      gap: 14px;
+    }
+    .spinner {
+      width: 32px;
+      height: 32px;
+      border: 3px solid rgba(45, 212, 191, 0.15);
+      border-top-color: #2DD4BF;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+    .error-card {
+      background: rgba(244, 63, 94, 0.08);
+      border: 1px solid rgba(244, 63, 94, 0.25);
+      color: #FDA4AF;
+      border-radius: 8px;
+      padding: 14px 18px;
+      font-size: 13px;
+      line-height: 1.5;
+      text-align: center;
+      max-width: 400px;
+    }
+  </style>
+</head>
+<body>
+  <div id="clerk-container">
+    <div id="loader">
+      <div class="spinner"></div>
+      <span>Initializing secure authentication...</span>
+    </div>
+    <div id="clerk-mount"></div>
+  </div>
+
+  <script>
+    // ── Streamlit Component Protocol ──────────────────────────────────────────
+    function sendStreamlitMessage(payload) {
+      try {
+        window.parent.postMessage(
+          Object.assign({ isStreamlitMessage: true }, payload),
+          "*"
+        );
+      } catch (e) {
+        console.error("Failed to post message to Streamlit:", e);
+      }
+    }
+
+    function setFrameHeight(height) {
+      sendStreamlitMessage({
+        type: "streamlit:setFrameHeight",
+        height: height
+      });
+    }
+
+    function setComponentValue(value) {
+      sendStreamlitMessage({
+        type: "streamlit:setComponentValue",
+        value: value
+      });
+    }
+
+    function updateHeight() {
+      var body = document.body;
+      var html = document.documentElement;
+      var height = Math.max(
+        body.scrollHeight,
+        body.offsetHeight,
+        html.clientHeight,
+        html.scrollHeight,
+        html.offsetHeight,
+        580
+      );
+      setFrameHeight(height + 16);
+    }
+
+    function showError(msg) {
+      var loader = document.getElementById("loader");
+      if (loader) {
+        loader.innerHTML = '<div class="error-card">' + msg + '</div>';
+      }
+      updateHeight();
+    }
+
+    // ── Clerk Lifecycle ───────────────────────────────────────────────────────
+    var _initialized = false;
+    var _clerk = null;
+
+    async function setupClerk(publishableKey, shouldSignOut) {
+      if (!publishableKey) {
+        showError("Clerk publishable key is missing. Please configure it in your secrets.");
+        return;
+      }
+
+      try {
+        // Dynamic script injection if not present
+        if (!window.Clerk) {
+          await new Promise(function(resolve, reject) {
+            var script = document.createElement("script");
+            script.setAttribute("data-clerk-publishable-key", publishableKey);
+            script.setAttribute("crossorigin", "anonymous");
+            script.src = "https://cdn.jsdelivr.net/npm/@clerk/clerk-js@5/dist/clerk.browser.js";
+            script.onload = resolve;
+            script.onerror = function() {
+              reject(new Error("Unable to load Clerk SDK. Please check your network connection."));
+            };
+            document.head.appendChild(script);
+          });
+        }
+
+        // Initialize instance
+        if (typeof window.Clerk === "function") {
+          _clerk = new window.Clerk(publishableKey);
+        } else {
+          _clerk = window.Clerk;
+        }
+
+        if (!_clerk) {
+          throw new Error("Clerk SDK failed to initialize.");
+        }
+
+        // Load Clerk with NutriGuard dark palette
+        await _clerk.load({
+          appearance: {
+            variables: {
+              colorPrimary: "#2DD4BF",
+              colorBackground: "#131B24",
+              colorText: "#F8FAFC",
+              colorInputBackground: "#0D131A",
+              colorInputText: "#F8FAFC",
+              colorTextSecondary: "#94A3B8",
+              borderRadius: "8px"
+            },
+            elements: {
+              rootBox: { width: "100%" },
+              card: {
+                backgroundColor: "#131B24",
+                border: "1px solid #1E293B",
+                boxShadow: "0 20px 48px rgba(0, 0, 0, 0.7)"
+              },
+              headerTitle: { color: "#F8FAFC", fontWeight: "700" },
+              headerSubtitle: { color: "#94A3B8" },
+              socialButtonsBlockButton: {
+                backgroundColor: "#1A2234",
+                borderColor: "#334155",
+                color: "#F8FAFC"
+              },
+              socialButtonsBlockButtonText: { color: "#F8FAFC", fontWeight: "600" },
+              dividerLine: { backgroundColor: "#1E293B" },
+              dividerText: { color: "#64748B" },
+              formFieldLabel: { color: "#CBD5E1" },
+              formFieldInput: {
+                backgroundColor: "#0D131A",
+                borderColor: "#334155",
+                color: "#F8FAFC"
+              },
+              formButtonPrimary: {
+                backgroundColor: "#2DD4BF",
+                color: "#0B0F14",
+                fontWeight: "700"
+              },
+              footerActionLink: { color: "#2DD4BF" }
+            }
+          }
+        });
+
+        // If a sign-out was requested, sign out first
+        if (shouldSignOut && _clerk.session) {
+          await _clerk.signOut();
+        }
+
+        var loader = document.getElementById("loader");
+        if (loader) loader.style.display = "none";
+
+        // Check if there is already an active session
+        if (_clerk.session && _clerk.session.id) {
+          setComponentValue(_clerk.session.id);
+          return;
+        }
+
+        // Mount the sign in component
+        var mountPoint = document.getElementById("clerk-mount");
+        _clerk.mountSignIn(mountPoint, {
+          routing: "virtual"
+        });
+
+        // Listen for user sign-in events
+        _clerk.addListener(function(state) {
+          if (state.session && state.session.id) {
+            setComponentValue(state.session.id);
+          }
+        });
+
+        updateHeight();
+        if (window.ResizeObserver) {
+          new ResizeObserver(updateHeight).observe(document.body);
+        }
+      } catch (err) {
+        showError("Authentication error: " + (err.message || String(err)));
+      }
+    }
+
+    // ── Listen for Streamlit render events ────────────────────────────────────
+    window.addEventListener("message", function(event) {
+      if (event.data && event.data.type === "streamlit:render") {
+        var args = event.data.args || {};
+        var pk = args.publishable_key;
+        var shouldSignOut = Boolean(args.sign_out);
+
+        if (!_initialized && pk) {
+          _initialized = true;
+          setupClerk(pk, shouldSignOut);
+        }
+      }
+    });
+
+    // Notify Streamlit that the component iframe is ready to receive args
+    sendStreamlitMessage({
+      type: "streamlit:componentReady",
+      apiVersion: 1
+    });
+    updateHeight();
+  </script>
+</body>
+</html>
