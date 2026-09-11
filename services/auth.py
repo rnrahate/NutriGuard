@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 import streamlit as st
-import streamlit.components.v1 as components
 
 from services.config import Settings
 
@@ -313,7 +312,7 @@ def _mount_clerk_widget(publishable_key: str) -> None:
 </body>
 </html>"""
     widget_html = template.replace("__CLERK_PK__", publishable_key)
-    components.html(widget_html, height=720, scrolling=True)
+    st.iframe(widget_html, height=720)
 
 
 def render_login_gate(settings: Settings) -> Optional[AuthUser]:
