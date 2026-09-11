@@ -116,36 +116,6 @@ def verify_session_token(token: str, settings: Settings) -> Optional[AuthUser]:
 
 # ── Login gate UI ─────────────────────────────────────────────────────────────
 
-def _render_header() -> None:
-    st.markdown(
-        """
-        <div class="ng-auth-container">
-          <div class="ng-auth-motif">
-            <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
-              <path d="M24 4L6 12V22C6 33.1 13.7 43.4 24 46C34.3 43.4 42 33.1 42 22V12L24 4Z"
-                    fill="url(#sg)" stroke="#2DD4BF" stroke-width="2" stroke-linejoin="round"/>
-              <path d="M16 24L22 30L32 18" stroke="#F8FAFC" stroke-width="3"
-                    stroke-linecap="round" stroke-linejoin="round"/>
-              <defs>
-                <linearGradient id="sg" x1="6" y1="4" x2="42" y2="46" gradientUnits="userSpaceOnUse">
-                  <stop stop-color="#1D2630"/>
-                  <stop offset="1" stop-color="#0F172A"/>
-                </linearGradient>
-              </defs>
-            </svg>
-          </div>
-          <div class="ng-auth-title">NUTRIGUARD</div>
-          <div class="ng-auth-tagline">VERIFY BEFORE YOU TRUST.</div>
-          <div class="ng-auth-subtitle">
-            AI-powered food image authenticity &amp; classification platform
-          </div>
-          <div class="ng-auth-divider"><span class="ng-auth-laser-beam"></span></div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 def render_login_gate(settings: Settings) -> Optional[AuthUser]:
     """
     Render the NutriGuard login gate.
@@ -164,7 +134,6 @@ def render_login_gate(settings: Settings) -> Optional[AuthUser]:
         return user
 
     configured = is_configured(settings)
-    _render_header()
 
     col1, col2, col3 = st.columns([1, 2.2, 1])
     with col2:
