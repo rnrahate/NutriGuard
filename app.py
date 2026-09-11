@@ -11,16 +11,8 @@ from typing import Optional
 from PIL import Image, UnidentifiedImageError
 import streamlit as st
 
-import importlib
 from components import cards, nav, pipeline, styles
 from services import auth, config, history_db, inference, model_loader, yolo_detector
-
-importlib.reload(styles)
-importlib.reload(cards)
-importlib.reload(pipeline)
-importlib.reload(nav)
-importlib.reload(auth)
-importlib.reload(config)
 
 from components.styles import COLORS, inject_global_styles
 from services.config import SETTINGS

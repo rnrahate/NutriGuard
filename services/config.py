@@ -85,8 +85,8 @@ class Settings:
 def load_settings() -> Settings:
     return Settings(
         root_dir=ROOT_DIR,
-        food_model_path=_resolve_path(_get_raw("FOOD_MODEL_PATH")),
-        fake_model_path=_resolve_path(_get_raw("FAKE_MODEL_PATH")),
+        food_model_path=_resolve_path(_get_raw("FOOD_MODEL_PATH") or "models/food-notfood-detection/resnet101_food101.pth"),
+        fake_model_path=_resolve_path(_get_raw("FAKE_MODEL_PATH") or "models/fake-image-detection/resnet101_fake_image_detector.pth"),
         yolo_model_path=_resolve_path(_get_raw("YOLO_MODEL_PATH")),
         food_confidence_threshold=_get_float("FOOD_CONFIDENCE_THRESHOLD", 0.80),
         fusion_alpha=_get_float("FUSION_ALPHA", 0.50),
