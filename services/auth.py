@@ -3,6 +3,11 @@ Clerk authentication — modular, secure, and styled for NutriGuard.
 
 CLERK_SECRET_KEY is never sent to the browser; it is only used server-side
 (in verify_session_token) to call Clerk's Backend REST API.
+
+Communication between the Clerk JS widget (inside st.iframe) and Streamlit
+uses window.parent.location.href redirect. Loop prevention is handled by
+tracking the last failed token in session state and clearing query params
+immediately on receipt.
 """
 from __future__ import annotations
 
@@ -15,6 +20,7 @@ import streamlit as st
 from services.config import Settings
 
 SESSION_KEY = "nutriguard_user"
+_FAIL_FLAG = "_clerk_verify_failed_token"
 
 
 @dataclass
@@ -37,9 +43,11 @@ def current_user() -> Optional[AuthUser]:
 def sign_out() -> None:
     st.session_state.pop(SESSION_KEY, None)
     st.session_state.pop("verification_result", None)
-    if "clerk_session" in st.query_params:
-        del st.query_params["clerk_session"]
-    st.query_params.clear()
+    st.session_state.pop(_FAIL_FLAG, None)
+    try:
+        st.query_params.clear()
+    except Exception:
+        pass
 
 
 def verify_session_token(token: str, settings: Settings) -> Optional[AuthUser]:
@@ -104,12 +112,21 @@ def verify_session_token(token: str, settings: Settings) -> Optional[AuthUser]:
         return None
 
 
-def _mount_clerk_widget(publishable_key: str) -> None:
-    template = """<!DOCTYPE html>
+def _build_clerk_html(publishable_key: str, force_signout: bool = False) -> str:
+    force_js = ""
+    if force_signout:
+        force_js = """
+      // Force sign-out any cached Clerk session to break redirect loop
+      try {
+        if (window.Clerk && window.Clerk.signOut) {
+          window.Clerk.signOut();
+        }
+      } catch(e) {}
+"""
+    return """<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8" />
-  <base href="http://localhost:8501/">
   <style>
     body {
       margin: 0;
@@ -148,57 +165,22 @@ def _mount_clerk_widget(publishable_key: str) -> None:
     }
   </style>
   <script>
+    // Protect history API from about:srcdoc origin errors
     (function() {
-      var parentUrl = 'http://localhost:8501/';
-      try {
-        if (window.parent && window.parent.location && window.parent.location.href) {
-          parentUrl = window.parent.location.href;
-        }
-      } catch(e) {}
-
-      var NativeURL = window.URL;
-      function SafeURL(url, base) {
-        if (typeof url === 'string' && (url === 'about:srcdoc' || url.indexOf('about:') === 0 || url === '')) {
-          url = parentUrl;
-        }
-        if (base && typeof base === 'string' && (base === 'about:srcdoc' || base.indexOf('about:') === 0)) {
-          base = parentUrl;
-        }
+      ['replaceState', 'pushState'].forEach(function(m) {
         try {
-          return new NativeURL(url, base);
-        } catch (err) {
-          return new NativeURL(parentUrl);
-        }
-      }
-      SafeURL.prototype = NativeURL.prototype;
-      for (var key in NativeURL) {
-        try { SafeURL[key] = NativeURL[key]; } catch(e) {}
-      }
-      window.URL = SafeURL;
-
-      // Protect history.replaceState and history.pushState from about:srcdoc URL mismatch errors
-      try {
-        var _origReplaceState = window.history.replaceState.bind(window.history);
-        window.history.replaceState = function(state, title, url) {
-          try {
-            return _origReplaceState(state, title, url);
-          } catch (e) {
-            try { return _origReplaceState(state, title); } catch (e2) {}
-          }
-        };
-        var _origPushState = window.history.pushState.bind(window.history);
-        window.history.pushState = function(state, title, url) {
-          try {
-            return _origPushState(state, title, url);
-          } catch (e) {
-            try { return _origPushState(state, title); } catch (e2) {}
-          }
-        };
-      } catch(e) {}
+          var orig = window.history[m].bind(window.history);
+          window.history[m] = function(s, t, u) {
+            try { return orig(s, t, u); } catch(e) { try { return orig(s, t); } catch(e2) {} }
+          };
+        } catch(e) {}
+      });
     })();
   </script>
-  <script src="https://cdn.jsdelivr.net/npm/@clerk/clerk-js@5/dist/clerk.browser.js"
-          data-clerk-publishable-key="__CLERK_PK__"></script>
+  <script async crossorigin="anonymous"
+    data-clerk-publishable-key="__CLERK_PK__"
+    src="https://cdn.jsdelivr.net/npm/@clerk/clerk-js@5/dist/clerk.browser.js">
+  </script>
 </head>
 <body>
   <div id="clerk-sign-in">
@@ -208,99 +190,67 @@ def _mount_clerk_widget(publishable_key: str) -> None:
     </div>
   </div>
   <script>
-    function handleSession(token) {
+    __FORCE_SIGNOUT_JS__
+
+    function sendSession(token) {
       if (!token) return;
       try {
-        const targetUrl = new URL(window.parent.location.href);
-        targetUrl.searchParams.set('clerk_session', token);
-        window.parent.location.href = targetUrl.toString();
-      } catch (e) {
+        var url = new URL(window.parent.location.href);
+        url.searchParams.set('clerk_session', token);
+        window.parent.location.replace(url.toString());
+      } catch(e) {
         try {
           window.top.location.search = '?clerk_session=' + encodeURIComponent(token);
-        } catch (e2) {
-          console.error('Redirection error:', e2);
-        }
+        } catch(e2) { console.warn('NutriGuard redirect failed', e2); }
       }
     }
 
-    async function initClerk() {
-      if (!window.Clerk) {
-        setTimeout(initClerk, 50);
-        return;
-      }
-      try {
-        await window.Clerk.load({
-          appearance: {
-            variables: {
-              colorPrimary: '#2DD4BF',
-              colorBackground: '#171E27',
-              colorText: '#F8FAFC',
-              colorInputBackground: '#10161D',
-              colorInputText: '#F8FAFC',
-              colorTextSecondary: '#94A3B8',
-              borderRadius: '8px'
-            },
-            elements: {
-              card: {
-                backgroundColor: '#171E27',
-                border: '1px solid #222D3D',
-                boxShadow: '0 12px 36px rgba(0,0,0,0.5)'
-              },
-              headerTitle: { color: '#F8FAFC', fontFamily: 'inherit' },
-              headerSubtitle: { color: '#94A3B8' },
-              socialButtonsBlockButton: {
-                backgroundColor: '#1F2937',
-                borderColor: '#374151',
-                color: '#F8FAFC'
-              },
-              socialButtonsBlockButtonText: {
-                color: '#F8FAFC',
-                fontWeight: '600'
-              },
-              dividerLine: { backgroundColor: '#2E3D52' },
-              dividerText: { color: '#94A3B8' },
-              formFieldLabel: { color: '#CBD5E1' },
-              formFieldInput: {
-                backgroundColor: '#10161D',
-                borderColor: '#2E3D52',
-                color: '#F8FAFC'
-              },
-              formButtonPrimary: {
-                backgroundColor: '#2DD4BF',
-                color: '#0B0F14',
-                fontWeight: '600',
-                '&:hover': { backgroundColor: '#14B8A6' }
-              },
-              footerActionLink: { color: '#2DD4BF' }
-            }
+    function initClerk() {
+      if (!window.Clerk) { setTimeout(initClerk, 100); return; }
+      window.Clerk.load({
+        appearance: {
+          variables: {
+            colorPrimary: '#2DD4BF', colorBackground: '#171E27',
+            colorText: '#F8FAFC', colorInputBackground: '#10161D',
+            colorInputText: '#F8FAFC', colorTextSecondary: '#94A3B8',
+            borderRadius: '8px'
+          },
+          elements: {
+            card: { backgroundColor: '#171E27', border: '1px solid #222D3D',
+                    boxShadow: '0 12px 36px rgba(0,0,0,0.5)' },
+            headerTitle: { color: '#F8FAFC' },
+            headerSubtitle: { color: '#94A3B8' },
+            socialButtonsBlockButton: { backgroundColor: '#1F2937',
+              borderColor: '#374151', color: '#F8FAFC' },
+            socialButtonsBlockButtonText: { color: '#F8FAFC', fontWeight: '600' },
+            dividerLine: { backgroundColor: '#2E3D52' },
+            dividerText: { color: '#94A3B8' },
+            formFieldLabel: { color: '#CBD5E1' },
+            formFieldInput: { backgroundColor: '#10161D',
+              borderColor: '#2E3D52', color: '#F8FAFC' },
+            formButtonPrimary: { backgroundColor: '#2DD4BF',
+              color: '#0B0F14', fontWeight: '600' },
+            footerActionLink: { color: '#2DD4BF' }
           }
-        });
-
-        const loader = document.getElementById('loader');
+        }
+      }).then(function() {
+        var loader = document.getElementById('loader');
         if (loader) loader.style.display = 'none';
-
         if (window.Clerk.session && window.Clerk.session.id) {
-          handleSession(window.Clerk.session.id);
+          sendSession(window.Clerk.session.id);
           return;
         }
-
-        const target = document.getElementById('clerk-sign-in');
-        window.Clerk.mountSignIn(target, {
-          routing: 'virtual'
+        var target = document.getElementById('clerk-sign-in');
+        window.Clerk.mountSignIn(target, { routing: 'virtual' });
+        window.Clerk.addListener(function(res) {
+          if (res.session && res.session.id) sendSession(res.session.id);
         });
-
-        window.Clerk.addListener(async ({ session }) => {
-          if (session && session.id) {
-            handleSession(session.id);
-          }
-        });
-      } catch (err) {
-        console.error('Failed to initialize Clerk:', err);
-        const loader = document.getElementById('loader');
-        if (loader) {
-          loader.innerHTML = '<span style="color:#F43F5E;font-size:13px;">Error initializing authentication: ' + (err.message || err) + '</span>';
-        }
-      }
+      }).catch(function(err) {
+        var loader = document.getElementById('loader');
+        if (loader) loader.innerHTML =
+          '<span style="color:#F43F5E;font-size:13px;">Auth error: ' +
+          (err.message || String(err)) + '</span>';
+      });
     }
 
     if (document.readyState === 'loading') {
@@ -311,42 +261,82 @@ def _mount_clerk_widget(publishable_key: str) -> None:
   </script>
 </body>
 </html>"""
-    widget_html = template.replace("__CLERK_PK__", publishable_key)
-    st.iframe(widget_html, height=720)
+
+
+def _mount_clerk_widget(publishable_key: str, force_signout: bool = False) -> None:
+    force_js = ""
+    if force_signout:
+        force_js = (
+            "try { if (window.Clerk && window.Clerk.signOut) {"
+            " window.Clerk.signOut(); } } catch(e) {}"
+        )
+    # Inject PK and optional force-signout JS into the template
+    raw = _build_clerk_html(publishable_key, force_signout=force_signout)
+    widget_html = raw.replace("__CLERK_PK__", publishable_key)
+    widget_html = widget_html.replace("__FORCE_SIGNOUT_JS__", force_js)
+    st.iframe(widget_html, height=680)
+
 
 
 def render_login_gate(settings: Settings) -> Optional[AuthUser]:
-    """Renders the custom NutriGuard-branded authentication experience and returns user if signed in."""
+    """
+    Renders the NutriGuard login gate.
+
+    Loop-safe flow:
+    1. Signout param → clear session and rerun.
+    2. User already in session state → return immediately.
+    3. ?clerk_session=<token> present → clear it immediately, then verify once.
+       - Success: store user, rerun.
+       - Failure: record failed token in session state, rerun (shows login page).
+    4. If last verification failed with the same token, show error + Clerk widget
+       with force_signout so Clerk JS clears its session before re-mounting.
+    """
     if "signout" in st.query_params:
         sign_out()
-        st.query_params.clear()
         st.rerun()
 
     user = current_user()
     if user:
         return user
 
-    # Check query params for returned session
-    token = st.query_params.get("clerk_session")
+    # ── Token handling ───────────────────────────────────────────────────────
+    token = st.query_params.get("clerk_session", "")
     if token:
-        with st.spinner("Verifying secure credentials..."):
-            verified = verify_session_token(token, settings)
-        if verified:
-            st.session_state[SESSION_KEY] = verified
-            st.query_params.clear()
-            st.rerun()
+        # IMMEDIATELY clear the query param to prevent rerun loops
+        st.query_params.clear()
+
+        last_failed = st.session_state.get(_FAIL_FLAG, "")
+        if token == last_failed:
+            # Same token failed before — show error but don't retry
+            st.session_state.pop(_FAIL_FLAG, None)
+            st.error(
+                "⚠️ Session verification failed. Please sign in again. "
+                "If this keeps happening, clear your browser cookies for this site."
+            )
         else:
-            st.error("Could not verify your session. Please sign in again.")
+            with st.spinner("Verifying secure credentials..."):
+                verified = verify_session_token(token, settings)
+            if verified:
+                st.session_state[SESSION_KEY] = verified
+                st.session_state.pop(_FAIL_FLAG, None)
+                st.rerun()
+            else:
+                # Record failure and rerun cleanly (no clerk_session in URL now)
+                st.session_state[_FAIL_FLAG] = token
+                st.rerun()
 
     configured = is_configured(settings)
+    # Show the Clerk widget with force_signout if the last attempt failed
+    # — this breaks the auto-redirect loop by clearing Clerk's cached session
+    failed_before = bool(st.session_state.get(_FAIL_FLAG, ""))
 
-    # Branded NutriGuard Login Header Container
+    # ── Branded login header ─────────────────────────────────────────────────
     st.markdown(
         """
         <div class="ng-auth-container">
           <div class="ng-auth-motif">
             <svg width="48" height="48" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M24 4L6 12V22C6 33.1 13.7 43.4 24 46C34.3 43.4 42 33.1 42 22V12L24 4Z" 
+              <path d="M24 4L6 12V22C6 33.1 13.7 43.4 24 46C34.3 43.4 42 33.1 42 22V12L24 4Z"
                     fill="url(#shield_grad)" stroke="#2DD4BF" stroke-width="2" stroke-linejoin="round"/>
               <path d="M16 24L22 30L32 18" stroke="#F8FAFC" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
               <defs>
@@ -360,7 +350,7 @@ def render_login_gate(settings: Settings) -> Optional[AuthUser]:
           <div class="ng-auth-title">NUTRIGUARD</div>
           <div class="ng-auth-tagline">VERIFY BEFORE YOU TRUST.</div>
           <div class="ng-auth-subtitle">
-            AI-powered food image authenticity & classification platform
+            AI-powered food image authenticity &amp; classification platform
           </div>
           <div class="ng-auth-divider">
             <span class="ng-auth-laser-beam"></span>
@@ -370,7 +360,6 @@ def render_login_gate(settings: Settings) -> Optional[AuthUser]:
         unsafe_allow_html=True,
     )
 
-    # Render Auth Widget or Configuration State
     if not configured:
         st.markdown(
             """
@@ -378,8 +367,8 @@ def render_login_gate(settings: Settings) -> Optional[AuthUser]:
               <div class="ng-card-label" style="color:#F59E0B;">DEVELOPMENT MODE</div>
               <div class="ng-card-title" style="font-size:1.15rem; color:#F8FAFC;">Clerk Keys Not Configured</div>
               <div class="ng-card-body" style="font-size:0.9rem; margin-bottom:1rem;">
-                Add <code>CLERK_PUBLISHABLE_KEY</code> and <code>CLERK_SECRET_KEY</code> to your <code>.env</code>
-                file to enable full identity verification. You can continue as a guest for local testing.
+                Add <code>CLERK_PUBLISHABLE_KEY</code> and <code>CLERK_SECRET_KEY</code> to your Streamlit
+                secrets (or <code>.env</code>) to enable full identity verification.
               </div>
             </div>
             """,
@@ -389,19 +378,26 @@ def render_login_gate(settings: Settings) -> Optional[AuthUser]:
     col1, col2, col3 = st.columns([1, 2.2, 1])
     with col2:
         if configured:
-            _mount_clerk_widget(settings.clerk_publishable_key)
+            _mount_clerk_widget(
+                settings.clerk_publishable_key,
+                force_signout=failed_before,
+            )
             st.markdown(
                 """
-                <div style="text-align:center; color:#64748B; font-size:0.8rem; margin-top:0.6rem; letter-spacing:0.02em;">
-                  🔒 Secure authentication powered by Clerk • End-to-end encrypted session
+                <div style="text-align:center; color:#64748B; font-size:0.8rem;
+                            margin-top:0.6rem; letter-spacing:0.02em;">
+                  🔒 Secure authentication powered by Clerk
                 </div>
                 """,
                 unsafe_allow_html=True,
             )
 
-        # Guest mode / fast bypass
         st.markdown("<div style='height:0.8rem;'></div>", unsafe_allow_html=True)
-        btn_label = "Continue as Guest" if not configured else "Or continue as Guest (Evaluation Mode)"
+        btn_label = (
+            "Continue as Guest"
+            if not configured
+            else "Or continue as Guest (Evaluation Mode)"
+        )
         if st.button(btn_label, type="secondary", use_container_width=True, key="guest_auth_btn"):
             st.session_state[SESSION_KEY] = AuthUser(
                 user_id="guest_evaluator",
@@ -409,6 +405,7 @@ def render_login_gate(settings: Settings) -> Optional[AuthUser]:
                 email="guest@nutriguard.ai",
                 is_guest=True,
             )
+            st.session_state.pop(_FAIL_FLAG, None)
             st.rerun()
 
     return None
