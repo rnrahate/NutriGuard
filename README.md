@@ -11,6 +11,21 @@ Camera / Upload → YOLO Food Detection → Food-101 ResNet-101 Classification
 → Confidence Gate → CIFAKE ResNet-101 Authenticity Check → Final Decision
 ```
 
+## Model weights on Hugging Face
+
+The trained model checkpoints are published on Hugging Face here:
+
+https://huggingface.co/rnrahate007/nutriguard-models
+
+Download the required files and place them in the app's model directories:
+
+```
+models/food-notfood-detection/resnet101_food101.pth
+models/fake-image-detection/resnet101_fake_image_detector.pth
+```
+
+This keeps the project ready to run without needing to retrain the ResNet-101 classifiers locally.
+
 ## Setup
 
 ```bash
