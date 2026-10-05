@@ -263,14 +263,15 @@ def run_verification(image: Image.Image, user_id: Optional[str]):
     )
 
 
-def yolo_detector_draw(image: Image.Image, detections):
+def yolo_detector_draw(image: Image.Image, detections, is_authentic: bool = True):
     from PIL import ImageDraw
     annotated = image.convert("RGB").copy()
     draw = ImageDraw.Draw(annotated)
     for det in detections:
         x1, y1, x2, y2 = det.box
         draw.rectangle([x1, y1, x2, y2], outline="#2DD4BF", width=3)
-        draw.text((x1 + 4, max(0, y1 - 16)), f"{det.label} {det.confidence:.0%}", fill="#2DD4BF")
+        tag = det.label.title() if is_authentic else "Region"
+        draw.text((x1 + 4, max(0, y1 - 16)), tag, fill="#2DD4BF")
     return annotated
 
 
@@ -280,42 +281,39 @@ def render_verification_result(result: dict):
     cls = result["classification"]
     auth_res = result.get("authenticity")
     decision = result["decision"]
+    is_authentic = (decision == "AUTHENTIC")
     food_label = cls.top_label.replace("_", " ").title()
 
-    # Prominent Final Result Card
-    if decision == "AUTHENTIC":
+    # Prominent Final Result Card with clean, non-ambiguous verdict text
+    if is_authentic:
         body_text = (
-            f"The image satisfies food validation ({cls.top_confidence:.1%} confidence for {food_label}) "
-            f"and meets the strict authenticity gate ({auth_res.real_probability:.1%} real likelihood vs "
-            f"{SETTINGS.authenticity_threshold:.0%} required threshold)."
+            f"The image has been validated as an authentic photograph of {food_label}. "
+            "Multi-stage neural inspection confirmed natural photographic characteristics "
+            "with no anomalous AI generation or diffusion artifacts detected."
         )
     elif decision == "SUSPECTED_AI":
         body_text = (
-            f"The image depicts {food_label} ({cls.top_confidence:.1%} confidence), but our authenticity "
-            f"neural network detected elevated synthetic indicators ({auth_res.synthetic_probability:.1%} synthetic likelihood). "
-            f"Because real likelihood ({auth_res.real_probability:.1%}) falls below the {SETTINGS.authenticity_threshold:.0%} "
-            "authenticity threshold, this image is flagged as suspected modern AI diffusion generation (e.g. Midjourney, DALL-E, SDXL, Flux)."
+            "The submitted image exhibits structural signatures characteristic of modern AI diffusion generation "
+            "(e.g. Midjourney, DALL-E, SDXL, Flux). Food dish classification has been withheld as the image "
+            "failed authenticity verification."
         )
     elif decision == "POTENTIALLY_AI_GENERATED":
         body_text = (
-            f"The image depicts {food_label} ({cls.top_confidence:.1%} confidence), but our authenticity "
-            f"neural network flagged a dominant {auth_res.synthetic_probability:.1%} probability of synthetic / AI generation."
+            "Our authenticity analysis identified dominant synthetic generation patterns consistent with artificial "
+            "AI generation rather than a genuine camera photograph. Food dish classification has been withheld "
+            "as the image failed authenticity verification."
         )
     else:
         body_text = (
-            f"The highest food confidence ({cls.top_confidence:.1%} for {food_label}) is below the required "
-            f"{SETTINGS.food_confidence_threshold:.0%} confidence gate. Authenticity analysis was withheld "
-            "to prevent misleading predictions on non-food or ambiguous images."
+            "The submitted image could not be reliably validated as an authentic food item. "
+            "Further authenticity analysis and culinary classification were withheld to ensure reporting integrity."
         )
 
     cards.final_result_card(
         decision,
         body_text,
-        food_name=food_label,
-        food_conf=cls.top_confidence,
+        food_name=(food_label if is_authentic else None),
         authenticity_label=(auth_res.label if auth_res else None),
-        ai_prob=(auth_res.synthetic_probability if auth_res else None),
-        fusion_score=result.get("fusion"),
     )
 
     # Detailed Analysis Columns
@@ -323,51 +321,32 @@ def render_verification_result(result: dict):
 
     with col_img:
         yolo_result = result["yolo"]
-        if yolo_result.configured and yolo_result.ran and yolo_result.detections:
+        yolo_has_detections = bool(yolo_result.configured and yolo_result.ran and yolo_result.detections)
+        if yolo_has_detections:
             tab_orig, tab_det = st.tabs(["Original Image", "YOLO Food Localization"])
             with tab_orig:
                 cards.image_scanner_box(result["image"], is_scanning=False)
             with tab_det:
-                annotated = yolo_detector_draw(result["image"], yolo_result.detections)
+                annotated = yolo_detector_draw(result["image"], yolo_result.detections, is_authentic=is_authentic)
                 cards.image_scanner_box(annotated, is_scanning=False)
             top_det = max(yolo_result.detections, key=lambda d: d.confidence)
-            st.caption(f"YOLO Localization · Detected: {top_det.label} (confidence {top_det.confidence:.0%})")
+            caption_text = f"YOLO Localization · Detected: {top_det.label.title()}" if is_authentic else "YOLO Localization · Food Region Isolated"
+            st.caption(caption_text)
         else:
             cards.image_scanner_box(result["image"], is_scanning=False)
             if not yolo_result.configured:
                 st.caption("YOLO model not configured in environment.")
 
     with col_metrics:
-        # Gauge Visualizer
-        st.markdown(
-            f"""
-            <div class="ng-card">
-              <div class="ng-card-label">CONFIDENCE GAUGE</div>
-            """,
-            unsafe_allow_html=True,
+        # Extract candidate class names without probability values
+        candidates = [label.replace('_', ' ').title() for label, _ in cls.top3] if (is_authentic and cls.top3) else []
+        cards.verification_audit_panel(
+            decision=decision,
+            food_name=food_label,
+            passed_gate=result["passed_threshold"],
+            yolo_detected=yolo_has_detections,
+            candidate_classes=candidates,
         )
-        gauge_col = COLORS["verified"] if result["passed_threshold"] else COLORS["warning"]
-        cards.circular_confidence_gauge(cls.top_confidence, label=f"FOOD: {food_label.upper()}", color=gauge_col)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        # Top 3 Candidates
-        if len(cls.top3) > 1:
-            with st.expander("Top Predicted Food Classes", expanded=True):
-                for label, conf in cls.top3:
-                    cards.confidence_bar(conf, label=label.replace('_', ' ').title(), color=COLORS["accent"])
-
-        # Authenticity Details
-        if auth_res:
-            cards.stage_card(
-                "SYNTHETIC ARTIFACT CHECK",
-                "Authenticity Metrics",
-                [
-                    ("Authenticity Verdict", auth_res.label),
-                    ("Synthetic Likelihood", f"{auth_res.synthetic_probability:.2%}"),
-                    ("Real Likelihood", f"{(1.0 - auth_res.synthetic_probability):.2%}"),
-                    ("Model Architecture", "ResNet-101 (CIFAKE)"),
-                ],
-            )
 
 
 def page_verify():
@@ -451,20 +430,22 @@ def page_history():
             badge_border = COLORS["verified_border"]
             badge_bg = COLORS["verified_bg"]
             badge_icon = "✓"
+            audit_status_label = "Natural Photographic Capture"
+            food_title = (r.food_category or "Unknown").replace("_", " ").title()
         elif r.final_decision in ("POTENTIALLY_AI_GENERATED", "SUSPECTED_AI"):
             badge_color = COLORS["alert"]
             badge_border = COLORS["alert_border"]
             badge_bg = COLORS["alert_bg"]
             badge_icon = "⚠"
+            audit_status_label = "Synthetic Indicators Flagged"
+            food_title = "Unverified Image (Authenticity Failed)"
         else:
             badge_color = COLORS["warning"]
             badge_border = COLORS["warning_border"]
             badge_bg = COLORS["warning_bg"]
             badge_icon = "●"
-
-        food_title = (r.food_category or "Unknown").replace("_", " ").title()
-        conf_str = f"{r.food_confidence:.1%}" if r.food_confidence is not None else "—"
-        ai_prob_str = f"{r.ai_probability:.1%}" if r.ai_probability is not None else "—"
+            audit_status_label = "Verification Withheld"
+            food_title = "Unverified Image (Low Quality / Inconclusive)"
 
         st.markdown(
             f"""
@@ -479,13 +460,9 @@ def page_history():
               </div>
 
               <div style="display:flex; align-items:center; gap:20px;">
-                <div>
-                  <div style="font-family:'JetBrains Mono',monospace; font-size:0.68rem; color:{COLORS['text_muted']};">CONFIDENCE</div>
-                  <div style="font-family:'JetBrains Mono',monospace; font-size:0.95rem; font-weight:600; color:{COLORS['text_primary']};">{conf_str}</div>
-                </div>
-                <div>
-                  <div style="font-family:'JetBrains Mono',monospace; font-size:0.68rem; color:{COLORS['text_muted']};">SYNTHETIC PROB</div>
-                  <div style="font-family:'JetBrains Mono',monospace; font-size:0.95rem; font-weight:600; color:{COLORS['text_primary']};">{ai_prob_str}</div>
+                <div style="text-align:right;">
+                  <div style="font-family:'JetBrains Mono',monospace; font-size:0.68rem; color:{COLORS['text_muted']}; letter-spacing:0.04em;">INTEGRITY AUDIT</div>
+                  <div style="font-family:'JetBrains Mono',monospace; font-size:0.85rem; font-weight:600; color:{badge_color};">{audit_status_label}</div>
                 </div>
                 <div style="padding:0.35rem 0.8rem; border-radius:6px; background:{badge_bg}; border:1px solid {badge_border}; color:{badge_color}; font-family:'JetBrains Mono',monospace; font-size:0.75rem; font-weight:600;">
                   {badge_icon} {html.escape(r.final_decision)}

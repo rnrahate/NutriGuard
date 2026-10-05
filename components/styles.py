@@ -704,6 +704,46 @@ hr {{
   margin: 1.4rem 0 !important;
 }}
 
+/* ================= Clean Audit & Categorization Tags ================= */
+.ng-tag-primary {{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(45, 212, 191, 0.12);
+  border: 1px solid rgba(45, 212, 191, 0.35);
+  color: #2DD4BF;
+  padding: 0.3rem 0.85rem;
+  border-radius: 20px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.8rem;
+  font-weight: 600;
+}}
+
+.ng-tag-muted {{
+  display: inline-flex;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid #222D3D;
+  color: #94A3B8;
+  padding: 0.3rem 0.85rem;
+  border-radius: 20px;
+  font-family: 'Inter', sans-serif;
+  font-size: 0.82rem;
+  font-weight: 500;
+}}
+
+.ng-audit-row {{
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid #222D3D;
+  font-size: 0.92rem;
+}}
+.ng-audit-row:last-child {{
+  border-bottom: none;
+}}
+
 /* ================= Responsive Adjustments ================= */
 @media (max-width: 768px) {{
   .ng-pipeline-grid {{
